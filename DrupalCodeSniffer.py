@@ -1,79 +1,150 @@
 import MySQLdb
+
 import os
 from subprocess import Popen, PIPE
 from shutil import rmtree
 
 from xml.dom import minidom
 
+from string import split
 
 class DrupalCodeSniffer:
 
-	def __init__(self):	
-		self.reports_path = os.path.expanduser('~') + '/drupal_code_sniffer_reports/reports'
-		if not os.path.exists(self.reports_path):
-			os.makedirs(self.reports_path)
+	# Version of the Drupal module to fetch.
+	version = ''
 
+	# Current module_id.
+	module_id = ''
+
+	# Current module name.
+	module_name = ''
+
+	# Current module git url.
+	module_git_url = ''
+
+	# Current module branch.
+	branch = ''
+
+	# Path where the module is on the local machine.
+	module_path = ''
+
+	def __init__(self, version = '7'):
+		self.version = '%s.x' % (version)
 		self.connection = MySQLdb.connect('localhost', 'root', 'password', 'drupalmodules')
-		self.cursor =  self.connection.cursor()
 
 	def __del__(self):
 		self.connection.close()
-		self.cursor.close()
 
+	# Parse a module to generate a PHP_CodeSniffer report for every valid branches.
 	def parse(self):
-		self.cursor.execute("""SELECT name, git_url, version FROM modules""")		
-		numrows = int(self.cursor.rowcount)
-		for i in range(numrows):			
-			(name, git_url, version) = self.cursor.fetchone()
-			self.sniff(name, git_url, version)			
-		
-	def sniff(self, name, git_url, version):
-		project_path = '/tmp/Drupal_CodeSniffer/project'
-		report_file = "%s/%s" % (self.reports_path, name)
+		cursor = self.connection.cursor()
+		cursor.execute("""SELECT id, name, git_url FROM modules WHERE name LIKE 'commerce_%' """)
 
+		numrows = int(cursor.rowcount)
+		for i in range(numrows):
+			(self.module_id, self.module_name, self.module_git_url) = cursor.fetchone()
+			print ("%s") % (self.module_name)
+
+			self.module_path = '/tmp/Drupal_CodeSniffer/project/%s' % (self.module_name)
+
+			# Download the module if it doens't exist
+			self.moduleDownload()
+
+			# For each valid branch run the code throught PHP_CodeSniffer.
+			for branch in self.moduleGetBranches():
+				#
+				self.branch = branch
+
+				# Checkout the current branch.
+				self.moduleUpdate()
+
+				# Run the code throught the Drupal code sniffer.
+				report = self.sniff()
+
+				# Save the report in the database.
+				self.saveReport(report)
+
+				# Print debug info to the console.
+				# @TODO : have a look on log().
+				print " > branch %s : %i error(s) and %i warning(s) found" % (self.branch, report['error'], report['warning'])
+		cursor.close()
+
+	def moduleDownload(self):
 		# Clone the project
-		branch = "7.x-%s.x" % (version)		
-		cmd = ["git clone %s --recursive --branch %s %s/%s" % (git_url, branch, project_path, name)]
-		res = Popen(cmd, shell=True, stdout=PIPE, stderr=PIPE).wait()
-		#print res.stdout.read()
-	
-		# Run PHP_CodeSniffer with Drupal standard through the project.
-		#cmd = "phpcs --standard=Drupal --extensions=php,module,inc,install,test,profile,theme,css,js,txt,info  --report=full --report-file=%s.txt %s/%s" % (report_file, project_path, name)
-		#print cmd
-		#res = Popen(cmd, shell=True, stdout=PIPE, stderr=PIPE)
-		#res.wait()
-		#print res.stdout.read()
-		
-		cmd = "phpcs --standard=Drupal --extensions=php,module,inc,install,test,profile,theme,css,js,txt,info -d error_reporting=0 --report=full %s/%s" % (project_path, name)
-		full = Popen(cmd, shell=True, stdout=PIPE, stderr=PIPE)
+		cmd = ["git clone %s --recursive %s" % (self.module_git_url, self.module_path)]
+		Popen(cmd, shell=True, stdout=PIPE, stderr=PIPE).wait()
 
-		cmd = "phpcs --standard=Drupal --extensions=php,module,inc,install,test,profile,theme,css,js,txt,info -d error_reporting=0 --report=summary %s/%s" % (project_path, name)
-		source = Popen(cmd, shell=True, stdout=PIPE, stderr=PIPE)
+	def moduleUpdate(self):
+		# Get the desired branch.
+		Popen(["git --git-dir=%s/.git checkout --branch %s" % (self.module_path, self.branch)], shell=True, stdout=PIPE, stderr=PIPE).wait
+		# Update the code repository
+		Popen(["git --git-dir=%s/.git pull" % (self.module_path)], shell=True, stdout=PIPE, stderr=PIPE).wait
 
-		#cmd = "phpcs --standard=Drupal --extensions=php,module,inc,install,test,profile,theme,css,js,txt,info  --report=summary --report-file=%s.txt %s/%s" % (report_file, project_path, name)		
-		cmd = "phpcs --standard=Drupal --extensions=php,module,inc,install,test,profile,theme,css,js,txt,info -d error_reporting=0 --report=xml %s/%s" % (project_path, name)
-		xml = Popen(cmd, shell=True, stdout=PIPE, stderr=PIPE)
-		xml = xml.stdout.read()		
+	def moduleGetBranches(self):
+		branches = []
+		cmd = ["git --git-dir=%s/.git branch -a" % (self.module_path)]
+		res = Popen(cmd, shell=True, stdout=PIPE, stderr=PIPE)
+		res.wait()
+
+		# Find in all branch a X.x version
+		for branch in res.stdout.readlines():
+			# Get the branch full name, split the full name to get the shortname,
+			# remove '\n' and save it to a list.
+			name = split(branch, '/')[-1].rstrip('\n')
+			if name.startswith(self.version):
+				branches.append(name)
+
+		return list(set(branches))
+
+	def sniff(self):
+		xml = self.snifferGetReport('xml')
 		(error, warning) = self.xmlReportAnalysis(xml)
 
-		print ("%s >> error %s  - warning %s") % (name, error, warning)
+		report = {}
+		report['error']   = error
+		report['warning'] = warning
+		report['summary'] = self.snifferGetReport('summary')
+		report['full']    = self.snifferGetReport('full')
+		report['source']  = self.snifferGetReport('source')
 
-		
-		#rmtree("%s/%s") % (project_path, name)
+		return report
 
+	def snifferGetReport(self, report_type):
+#		cmd = "phpcs --standard=Drupal --extensions=php,module,inc,install,test,profile,theme,css,js,txt,info -d error_reporting=0 --report=%s %s" % (report_type, self.module_path)
+		cmd = "phpcs --standard=Drupal --extensions=module,inc,install,test,profile,theme,css,js,txt,info -d error_reporting=0 --report=%s %s" % (report_type, self.module_path)
+		process = Popen(cmd,
+    	bufsize=-1,
+      stdin=PIPE,
+	    stdout=PIPE,
+  	  stderr=PIPE,
+      shell=True,
+      cwd=os.curdir,
+      env=os.environ)
+		return process.stdout.read()
 
 	def xmlReportAnalysis(self, xml):
 		error = warning = 0
-
 		doc = minidom.parseString(xml)
-		for node in doc.getElementsByTagName("file"):
-			error = error + int(node.getAttribute("errors"))
-			warning = warning + int(node.getAttribute("warnings"))
+		xmlfile = doc.getElementsByTagName("file")
+		if xmlfile:
+			for node in xmlfile:
+				error = error + int(node.getAttribute("errors"))
+				warning = warning + int(node.getAttribute("warnings"))
 
-		return (error, warning)	
-		#rmtree(project_path)		
+		return (error, warning)
 
-
-
+	def saveReport(self, report):
+		cursor = self.connection.cursor()
+		cursor.execute("""INSERT INTO reports (module_id, branch, error, warning, summary, report, source) VALUES (%s, %s, %s, %s, %s, %s, %s)""",
+			(self.module_id,
+			self.branch,
+			report['error'],
+			report['warning'],
+			report['summary'],
+			report['full'],
+			report['source'],
+		))
+		cursor.close()
+		self.connection.commit()
 
 DrupalCodeSniffer().parse()
