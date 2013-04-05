@@ -35,8 +35,10 @@ class DrupalCodeSniffer:
 	# Parse a module to generate a PHP_CodeSniffer report for every valid branches.
 	def parse(self):
 		cursor = self.connection.cursor()
-		#cursor.execute("""SELECT id, name, git_url FROM modules WHERE name LIKE 'commerce_%' """)
+		#cursor.execute("""SELECT id, name, git_url, exclude FROM modules WHERE name LIKE 'commerce_%' """)
 		cursor.execute("""SELECT id, name, git_url, exclude FROM modules""")
+
+		# / ! \ have a look to the plato_tipico module.
 
 		numrows = int(cursor.rowcount)
 		for i in range(numrows):
@@ -138,9 +140,10 @@ class DrupalCodeSniffer:
 
 	def snifferGetReport(self, report_type):
 
-		print "Generating the %s report"  % (report_type)
+		print "Generating %s report"  % (report_type)
 #		cmd = "phpcs --standard=Drupal --extensions=php,module,inc,install,test,profile,theme,css,js,txt,info -d error_reporting=0 --report=%s %s" % (report_type, self.module_path)
 		cmd = "phpcs --standard=Drupal --extensions=module,inc,install,test,profile,theme,css,js,txt,info -d error_reporting=0 --report=%s %s" % (report_type, self.module_path)
+		#print cmd
 		process = Popen(cmd,
     	bufsize=-1,
       stdin=PIPE,
